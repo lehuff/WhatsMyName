@@ -26,6 +26,8 @@ import string
 import signal
 import sys
 import codecs
+import multiprocessing
+from multiprocessing import Pool
 
 ###################
 # Variables && Functions
@@ -40,10 +42,12 @@ parser = argparse.ArgumentParser(description="This standalone script will look u
 parser.add_argument('-u', '--username', help='[OPTIONAL] If this param is passed then this script will perform the '
                                              'lookups against the given user name instead of running checks against '
                                              'the JSON file.')
-parser.add_argument('-se', '--stringerror', help="Creates a site by site file for files that do not match strings. Filenames will be 'se-(sitename).(username)",
-                    action="store_true", default=False)
+parser.add_argument('-se', '--stringerror', help="Creates a site by site file for files that do not match strings. "
+                                                 "Filenames will be 'se-(sitename).(username)", action="store_true",
+                    default=False)
+parser.add_argument('-s', '--site', nargs='*', help='[OPTIONAL] If this parameter is passed the script will check only '
+                                                    'the named site or list of sites.')
 args = parser.parse_args()
-
 # Create the final results dictionary
 overall_results = {}
 
@@ -92,7 +96,7 @@ else:
 
 
 def signal_handler(signal, frame):
-    print(bcolors.RED + ' !!!  You pressed Ctrl+C. Exitting script.' + bcolors.ENDC)
+    print(bcolors.RED + ' !!!  You pressed Ctrl+C. Exiting script.' + bcolors.ENDC)
     finaloutput()
     sys.exit(0)
 
@@ -134,17 +138,26 @@ requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 # Read in the JSON file
 with open('web_accounts_list.json') as data_file:
     data = json.load(data_file)
-print ' -  %s sites found in file.' % len(data['sites'])
 
-for site in data['sites']:
+if args.site:
+
+    # cut the list of sites down to only the requested ones
+    args.site = [x.lower() for x in args.site]
+    data['sites'] = [x for x in data['sites'] if x['name'].lower() in args.site]
+    if len(data['sites']) == 0:
+        print ' -  Sorry, the requested site or sites were not found in the list'
+        sys.exit()
+    sites_not_found = len(args.site) - len(data['sites'])
+    if sites_not_found:
+        print ' -  WARNING: %d requested sites were not found in the list' % sites_not_found
+    print ' -  Checking %d sites' % len(data['sites'])
+
+else:
+    print ' -  %s sites found in file.' % len(data['sites'])
+
+
+def scanner(site):
     code_match, string_match = False, False
-    # Examine the current validity of the entry
-    if not site['valid']:
-        print bcolors.CYAN + ' *  Skipping %s - Marked as not valid.' % site['name'] + bcolors.ENDC
-        continue
-    if not site['known_accounts'][0]:
-        print bcolors.CYAN + ' *  Skipping %s - No valid user names to test.' % site['name'] + bcolors.ENDC
-        continue
 
     # Perform initial lookup
     # Pull the first user from known_accounts and replace the {account} with it
@@ -233,10 +246,26 @@ for site in data['sites']:
                                             (str(r.status_code), site['account_existence_code'])
         else:
             # TODO set site['valid'] = False
-            print bcolors.RED + '      !  ERROR: BAD CODE AND STRING. Neither the HTTP response code or detection ' \
+            print bcolors.RED + '      !  ERROR: BAD CODE AND STRING. Neither the HTTP response code or detection '\
                                 'string worked.' + bcolors.ENDC
             overall_results[site['name']] = 'Bad detection code and string. Received Code: %s; Expected Code: %s.' \
                                             % (str(r.status_code), site['account_existence_code'])
+
+thread_list = []
+for target in data['sites']:
+    if not target['valid']:
+        print bcolors.CYAN + ' *  Skipping %s - Marked as not valid.' % target['name'] + bcolors.ENDC
+        continue
+    if not target['known_accounts'][0]:
+        print bcolors.CYAN + ' *  Skipping %s - No valid user names to test.' % target['name'] + bcolors.ENDC
+        continue
+    if target['valid'] and target['known_accounts'][0]:
+        thread_list.append(target)
+
+if __name__ == '__main__':
+    while len(thread_list) != 0:
+        pool = Pool(processes=3)
+        p = pool.apply_async(scanner(thread_list.pop()))
 
 if not args.username:
     finaloutput()
